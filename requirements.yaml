@@ -1,0 +1,15 @@
+packages:
+  "recharts": "For stock price sparklines, bar charts, and consensus visualization"
+  "framer-motion": "For page transitions, list animations, and smooth UI reveals"
+  "date-fns": "For formatting timestamps and backtest dates"
+  "clsx": "For conditional tailwind classes"
+  "tailwind-merge": "For conditional tailwind classes"
+
+images:
+  - path: "artifacts/marketshadow/public/images/noise.png"
+    description: "Subtle dark mode noise texture, very low opacity, seamless pattern for premium finance terminal background"
+    aspect_ratio: "16:9"
+
+notes:
+  - Using generated Orval hooks from @workspace/api-client-react
+  - Defaulting to a dark professional finance terminal aesthetic
