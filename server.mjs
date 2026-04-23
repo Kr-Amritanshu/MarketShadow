@@ -12,6 +12,16 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// ── Yahoo Finance config (cloud-friendly) ─────────────────────────────────────
+try {
+  yahooFinance.suppressNotices(["yahooSurvey", "ripHistorical"]);
+  yahooFinance.setGlobalConfig({
+    validation: { logErrors: false, logOptionsErrors: false },
+  });
+} catch (e) {
+  console.warn("yahoo-finance2 config warning:", e?.message ?? e);
+}
+
 // ── Database ──────────────────────────────────────────────────────────────────
 const pool = process.env.DATABASE_URL
   ? new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } })
@@ -66,13 +76,45 @@ async function fetchStockData(ticker, days = 90) {
   const endDate = new Date();
   const startDate = new Date();
   startDate.setDate(startDate.getDate() - days);
-  try {
-    const result = await yahooFinance.chart(ticker, { period1: startDate, period2: endDate, interval: "1d" });
-    if (!result.quotes || !result.quotes.length) return [];
-    return result.quotes
-      .filter(q => q.open != null && q.close != null && q.volume != null)
-      .map(q => ({ date: new Date(q.date), open: q.open??0, high: q.high??0, low: q.low??0, close: q.close??0, volume: q.volume??0 }));
-  } catch { return []; }
+
+  // Try chart() first, then historical() as fallback
+  for (const attempt of ["chart", "historical"]) {
+    try {
+      let quotes;
+      if (attempt === "chart") {
+        const result = await yahooFinance.chart(ticker, {
+          period1: startDate,
+          period2: endDate,
+          interval: "1d",
+        });
+        quotes = result?.quotes ?? [];
+      } else {
+        quotes = await yahooFinance.historical(ticker, {
+          period1: startDate,
+          period2: endDate,
+          interval: "1d",
+        });
+      }
+
+      if (!quotes || !quotes.length) continue;
+
+      const rows = quotes
+        .filter((q) => q.open != null && q.close != null && q.volume != null)
+        .map((q) => ({
+          date: new Date(q.date),
+          open: q.open ?? 0,
+          high: q.high ?? 0,
+          low: q.low ?? 0,
+          close: q.close ?? 0,
+          volume: q.volume ?? 0,
+        }));
+
+      if (rows.length > 0) return rows;
+    } catch (err) {
+      console.error(`[fetchStockData] ${attempt} failed for ${ticker}:`, err?.message ?? err);
+    }
+  }
+  return [];
 }
 
 function rollingMean(arr, window, idx) {
@@ -267,7 +309,10 @@ async function analyzeStock(ticker) {
     const hc = sms >= 65 && cons.bullish_count >= 6;
     const ph = rows.slice(-60).map(r => ({ date: r.date.toISOString().split("T")[0], close: +r.close.toFixed(2), volume: r.volume }));
     return { ticker, current_price: +latest.close.toFixed(2), price_change_pct: +latest.price_change_pct.toFixed(2), volume: latest.volume, volume_ratio: +latest.volume_ratio.toFixed(2), is_anomaly: latest.is_anomaly, anomaly_score: latest.anomaly_score, pattern_type: pt, block_orders: bo, smart_money_score: sms, score_label: sl, score_color: sc, is_high_conviction: hc, consensus: cons, indicators: ind, price_history: ph };
-  } catch { return null; }
+  } catch (err) {
+    console.error(`[analyzeStock] ${ticker}:`, err?.message ?? err);
+    return null;
+  }
 }
 
 async function runBacktest(ticker) {
@@ -289,7 +334,10 @@ async function runBacktest(ticker) {
     if (!results.length) return { ticker, total_signals: 0, correct_signals: 0, precision: 0, avg_return_pct: 0, signals: [] };
     const total = results.length, correct = results.filter(r => r.correct).length;
     return { ticker, total_signals: total, correct_signals: correct, precision: +((correct/total)*100).toFixed(1), avg_return_pct: +(results.reduce((s,r) => s+r.max_return_pct, 0)/total).toFixed(2), signals: results.slice(-20) };
-  } catch { return null; }
+  } catch (err) {
+    console.error(`[runBacktest] ${ticker}:`, err?.message ?? err);
+    return null;
+  }
 }
 
 // ── Routes ────────────────────────────────────────────────────────────────────
@@ -299,6 +347,7 @@ app.get("/api/signals", async (_req, res) => {
   const results = await Promise.allSettled(DEFAULT_STOCKS.map(t => analyzeStock(t)));
   const signals = results.map(r => r.status === "fulfilled" ? r.value : null).filter(Boolean);
   signals.sort((a, b) => (b?.smart_money_score ?? 0) - (a?.smart_money_score ?? 0));
+  console.log(`[/api/signals] returned ${signals.length}/${DEFAULT_STOCKS.length} stocks`);
   res.json(signals);
 });
 
@@ -342,7 +391,7 @@ app.get("/api/watchlist", async (_req, res) => {
   try {
     const { rows } = await pool.query("SELECT * FROM watchlist_items ORDER BY added_at ASC");
     res.json(rows.map(r => ({ ...r, added_at: r.added_at.toISOString() })));
-  } catch { res.status(500).json({ error: "Database error" }); }
+  } catch (err) { console.error("[/api/watchlist GET]", err?.message ?? err); res.status(500).json({ error: "Database error" }); }
 });
 
 app.post("/api/watchlist", async (req, res) => {
@@ -353,7 +402,7 @@ app.post("/api/watchlist", async (req, res) => {
   try {
     const { rows } = await pool.query("INSERT INTO watchlist_items (ticker, user_note) VALUES ($1, $2) RETURNING *", [t, user_note ?? null]);
     res.status(201).json({ ...rows[0], added_at: rows[0].added_at.toISOString() });
-  } catch { res.status(500).json({ error: "Database error" }); }
+  } catch (err) { console.error("[/api/watchlist POST]", err?.message ?? err); res.status(500).json({ error: "Database error" }); }
 });
 
 app.delete("/api/watchlist/:id", async (req, res) => {
@@ -363,7 +412,7 @@ app.delete("/api/watchlist/:id", async (req, res) => {
   try {
     await pool.query("DELETE FROM watchlist_items WHERE id = $1", [id]);
     res.json({ success: true });
-  } catch { res.status(500).json({ error: "Database error" }); }
+  } catch (err) { console.error("[/api/watchlist DELETE]", err?.message ?? err); res.status(500).json({ error: "Database error" }); }
 });
 
 app.get("/api/backtest/:ticker", async (req, res) => {
