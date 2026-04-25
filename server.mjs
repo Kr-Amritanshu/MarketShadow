@@ -3,7 +3,8 @@ import cors from "cors";
 import path from "path";
 import { fileURLToPath } from "url";
 import pkg from "pg";
-import yahooFinance from "yahoo-finance2";
+import YahooFinance from "yahoo-finance2";
+const yahooFinance = new YahooFinance();
 
 const { Pool } = pkg;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
